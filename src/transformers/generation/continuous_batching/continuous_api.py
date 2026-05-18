@@ -886,6 +886,7 @@ class ContinuousBatchingManager:
                     self._has_new_requests.clear()
 
             # In async mode, the last batch's results are still in flight: switch to the right IO pair and process them
+            # Even happens for a hard stop, since the results are already available on the device
             if isinstance(batch_processor.inputs_and_outputs, ContinuousBatchingAsyncIOs):
                 batch_processor.inputs_and_outputs.current_pair = 1 - batch_processor.inputs_and_outputs.current_pair
                 batch_processor.update_batch()
@@ -896,6 +897,11 @@ class ContinuousBatchingManager:
             self._handle_critical_error(e, batch_processor)
         finally:
             logger.info("Generation loop finished.")
+            # This should be a no-op unless a user asked for a hard stop
+            error = RuntimeError(
+                f"Generation loop finished before this request completed w/ {self.background_thread_status.tp = }"
+            )
+            self._fail_all_remaining_requests(error, batch_processor)
 
     def _generation_step(self) -> None:
         """Perform a single generation step. This is mostly cuda graphed"""
@@ -961,6 +967,11 @@ class ContinuousBatchingManager:
         )
         # Communicate to other processes in the TP group that the group is stopping (they could have not crashed)
         self.distributed_helper.tp_broadcast_state(0, BackgroundThreadStatus.HARD_STOP)
+        # Fail all remaining requests
+        self._fail_all_remaining_requests(error, batch_processor)
+
+    def _fail_all_remaining_requests(self, error: Exception, batch_processor: ContinuousBatchProcessor | None) -> None:
+        """Fail all remaining requests in the input queue and active requests."""
         # Fail pending requests in input queue
         try:
             while True:
@@ -969,7 +980,7 @@ class ContinuousBatchingManager:
                     batch_processor._handle_request_error(error, req_data)
         except queue.Empty:
             pass
-        # Fail active requests
+        # Fail active and waiting requests
         if batch_processor is not None:
             batch_processor.fail_all_requests(error)
     # endregion: background thread only methods
