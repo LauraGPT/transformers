@@ -136,39 +136,44 @@ class BackgroundThreadStatus:
 
     def __init__(self) -> None:
         self._main_thread_lock = threading.Lock()
-        self._future_stop_status = self.DONT_STOP
-        self._current_stop_status = self.DONT_STOP
+        self._local_status = self.DONT_STOP
+        self._tp_status = self.DONT_STOP
 
     def clear(self) -> None:
+        """Clear the local and TP statuses. This method should ONLY be called by the main thread itself BEFORE starting
+        the background thread."""
         with self._main_thread_lock:
-            self._future_stop_status = self.DONT_STOP
-            self._current_stop_status = self.DONT_STOP
+            self._local_status = self.DONT_STOP
+            self._tp_status = self.DONT_STOP
 
-    def request_stop(self, stop_status: int) -> None:
-        if stop_status > self._current_stop_status:
-            with self._main_thread_lock:
-                self._future_stop_status = stop_status
+    def request_stop(self, status: int, global_rank: int) -> None:
+        """Request the background thread to stop. This does not take effect immidiately, only after the TP group has
+        communicated."""
+        if status not in [self.FLUSH_AND_STOP, self.HARD_STOP]:
+            raise ValueError(f"Invalid stop status {status} from rank {global_rank}")
+        with self._main_thread_lock:
+            self._local_status = max(status, self._local_status, self._tp_status)
+        logger.info(
+            f"Rank {global_rank} requested background thread to stop with {status = }. Now {self._local_status = }"
+        )
 
-    def update_tp_stop_status(self, tp_stop_status: int) -> None:
-        if tp_stop_status < self._current_stop_status:
-            raise ValueError(f"TP communicated a lower stop status: {tp_stop_status} < {self._current_stop_status}")
-        self._current_stop_status = tp_stop_status
+    def update_with_tp_status(self, tp_status: int) -> None:
+        """Update the  local and TP statuses with the new TP status. This method should ONLY be called by the background
+        thread itself: since there is only one of those, no need to use the lock."""
+        if tp_status < max(self._local_status, self._tp_status):
+            raise ValueError(
+                f"TP communicated a lower stop status: {tp_status = }, {self._local_status = }, {self._tp_status = }"
+            )
+        self._local_status = tp_status
+        self._tp_status = tp_status
 
     @property
-    def stop_status(self) -> int:
-        return self._current_stop_status
+    def local(self) -> int:
+        return self._local_status
 
     @property
-    def stop_requested(self) -> bool:
-        return self._future_stop_status >= BackgroundThreadStatus.FLUSH_AND_STOP
-
-    @property
-    def is_stopping(self) -> bool:
-        return self._current_stop_status >= BackgroundThreadStatus.FLUSH_AND_STOP
-
-    @property
-    def is_hard_stopping(self) -> bool:
-        return self._current_stop_status == BackgroundThreadStatus.HARD_STOP
+    def tp(self) -> int:
+        return self._tp_status
 
 
 # Continuous Batch Processor (Internal Logic)
@@ -228,7 +233,6 @@ class ContinuousBatchProcessor:
 
         # Get an integer seed for the TP group. Also work for no TP.
         self.distributed_helper.set_tp_seed(continuous_batching_config.seed, model_device)
-        self.stop_signal_received = False  # will be set to True if the TP driver stops the generation loop
 
         # Retrieve the size of the sliding window if there is one
         self.sliding_window = 1 if getattr(config, "sliding_window", None) is None else config.sliding_window
@@ -294,7 +298,6 @@ class ContinuousBatchProcessor:
         self.scheduler.reset()
         self.inputs_and_outputs.reset()
         self.cache.free_all_requests()
-        self.stop_signal_received = False
 
     def _update_tp_group_state(self) -> bool:
         """Communicates with the TP group to get A. the new requests and cancellations from the TP driver, and B. an
@@ -305,17 +308,17 @@ class ContinuousBatchProcessor:
             payload = (drain_queue(self.input_queue), drain_queue(self.cancel_queue))
         else:
             payload = ([], [])
-        # And the size of the payload is infered (always 0 for non-TP drivers)
+        # And the size of the payload is inferred (always 0 for non-TP drivers)
         payload_size = len(payload[0]) + len(payload[1])
-        # Then ALL members of the TP check if their stop event has been set
-        local_stop_status = self.background_thread_status.stop_status
-        # The two informations are broadcasted to all members of the TP group (cheap 2 ints broadcast)
-        payload_size, tp_stop_status = self.distributed_helper.tp_broadcast_state(payload_size, local_stop_status)
+
+        # Cheat 2 ints broadcast of payload size (from rank 0) and requested stop status (all to all)
+        local_requested_status = self.background_thread_status.local
+        payload_size, tp_status = self.distributed_helper.tp_broadcast_state(payload_size, local_requested_status)
         # Update the local stop status with the new one
-        self.background_thread_status.update_tp_stop_status(tp_stop_status)
+        self.background_thread_status.update_with_tp_status(tp_status)
 
         # Exit early if the TP group is hard-stopping
-        if self.background_thread_status.is_hard_stopping:
+        if self.background_thread_status.tp == BackgroundThreadStatus.HARD_STOP:
             return True
         # Same if there is no payload
         if payload_size == 0:
@@ -648,9 +651,7 @@ class ContinuousBatchingManager:
         # Signal the background thread to stop
         stop_trigger_time = perf_counter()
         stop_status = BackgroundThreadStatus.HARD_STOP if hard_stop else BackgroundThreadStatus.FLUSH_AND_STOP
-        if not self.background_thread_status < stop_status:
-            self.background_thread_status.request_stop(stop_status)
-            logger.info(f"Stopping background generation thread with status {stop_status}...")
+        self.background_thread_status.request_stop(stop_status, self.distributed_helper.global_rank)
         # And maybe wait for that to happen
         if block:
             self.join(stop_trigger_time, timeout)
@@ -724,7 +725,7 @@ class ContinuousBatchingManager:
                 self._request_counter += 1
 
         # If the manager is not accepting new requests, throw a warning and return None
-        if self.background_thread_status.stop_requested:
+        if self.background_thread_status.local >= BackgroundThreadStatus.FLUSH_AND_STOP:
             logger.warning(f"Background thread is stopping. Request {request_id} will be dropped.")
             return None
 
@@ -871,13 +872,15 @@ class ContinuousBatchingManager:
             # The loop continues until a stop signal has been broadcasted in the TP group
             while True:
                 requests_available = batch_processor.prepare_next_batch()  # this is where the TP group communicates
-                # This only happen if the TP group is not stoppig (any kin d of stop) so we can check the status after
+                # This only happens if the TP group is not stopping (any kind of stop) so we can check the status after
                 if requests_available:
                     self._generation_step()
                     batch_processor.update_batch()
                     self.current_batch += 1
-                elif self.background_thread_status.is_stopping:
+                # Here, we give the opportunity for the loop to exit if the TP group is stopping
+                elif self.background_thread_status.tp > BackgroundThreadStatus.DONT_STOP:
                     break
+                # Otherwise, we wait for new requests and re-enter the loop
                 else:
                     self._has_new_requests.wait(timeout=0.1)  # wait for new requests instead of busy-spinning.
                     self._has_new_requests.clear()
@@ -953,8 +956,10 @@ class ContinuousBatchingManager:
         # Record the error so callers (e.g. the serving layer) can fail fast on subsequent requests
         self.fatal_error = error
         # Request a hard stop
-        self.background_thread_status.request_stop(BackgroundThreadStatus.HARD_STOP)
-        # Communicate to other process in the TP group that the TP driver is stopping
+        self.background_thread_status.request_stop(
+            status=BackgroundThreadStatus.HARD_STOP, global_rank=self.distributed_helper.global_rank
+        )
+        # Communicate to other processes in the TP group that the group is stopping (they could have not crashed)
         self.distributed_helper.tp_broadcast_state(0, BackgroundThreadStatus.HARD_STOP)
         # Fail pending requests in input queue
         try:
