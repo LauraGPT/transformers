@@ -128,6 +128,49 @@ class OutputRouter:
             loop.call_soon_threadsafe(_run_batch)
 
 
+class BackgroundThreadStatus:
+
+    DONT_STOP = 0
+    FLUSH_AND_STOP = 1
+    HARD_STOP = 2
+
+    def __init__(self) -> None:
+        self._main_thread_lock = threading.Lock()
+        self._future_stop_status = self.DONT_STOP
+        self._current_stop_status = self.DONT_STOP
+
+    def clear(self) -> None:
+        with self._main_thread_lock:
+            self._future_stop_status = self.DONT_STOP
+            self._current_stop_status = self.DONT_STOP
+
+    def request_stop(self, stop_status: int) -> None:
+        if stop_status > self._current_stop_status:
+            with self._main_thread_lock:
+                self._future_stop_status = stop_status
+
+    def update_tp_stop_status(self, tp_stop_status: int) -> None:
+        if tp_stop_status < self._current_stop_status:
+            raise ValueError(f"TP communicated a lower stop status: {tp_stop_status} < {self._current_stop_status}")
+        self._current_stop_status = tp_stop_status
+
+    @property
+    def stop_status(self) -> int:
+        return self._current_stop_status
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._future_stop_status >= BackgroundThreadStatus.FLUSH_AND_STOP
+
+    @property
+    def is_stopping(self) -> bool:
+        return self._current_stop_status >= BackgroundThreadStatus.FLUSH_AND_STOP
+
+    @property
+    def is_hard_stopping(self) -> bool:
+        return self._current_stop_status == BackgroundThreadStatus.HARD_STOP
+
+
 # Continuous Batch Processor (Internal Logic)
 class ContinuousBatchProcessor:
     inputs_and_outputs: ContinuousBatchingIOs | ContinuousBatchingAsyncIOs
@@ -143,7 +186,7 @@ class ContinuousBatchProcessor:
         input_queue: queue.Queue | None,
         cancel_queue: queue.Queue | None,
         output_router: OutputRouter,
-        stop_event: threading.Event,
+        background_thread_status: BackgroundThreadStatus,
         model_device: torch.device,
         model_dtype: torch.dtype,
         scheduler: Scheduler,
@@ -160,7 +203,7 @@ class ContinuousBatchProcessor:
             input_queue: Queue for incoming requests. Is None if this process is not a TP driver.
             cancel_queue: Queue for cancellation request_ids. Is None if this process is not a TP driver.
             output_router: An [`OutputRouter`] object that routes outputs to handlers or the output queue.
-            stop_event: Event to signal processing should stop
+            background_thread_status: An [`BackgroundThreadStatus`] object to track the background thread status.
             model_device: Device for model inputs/outputs
             model_dtype: Data type for model inputs/outputs
             scheduler: The [`Scheduler`] to use
@@ -173,7 +216,7 @@ class ContinuousBatchProcessor:
         self.input_queue = input_queue
         self.cancel_queue = cancel_queue
         self.output_router = output_router
-        self.stop_event = stop_event
+        self.background_thread_status = background_thread_status
         self.model_device = model_device
         self.model_dtype = model_dtype
         self.scheduler = scheduler
@@ -255,7 +298,7 @@ class ContinuousBatchProcessor:
 
     def _update_tp_group_state(self) -> bool:
         """Communicates with the TP group to get A. the new requests and cancellations from the TP driver, and B. an
-        eventual stop signal from any process in the TP group. Returns True if the TP group is shutting down, False
+        eventual stop signal from any process in the TP group. Returns True if the TP group is hard-stopping, False
         otherwise"""
         # First the TP driver retrieves new requests and cancellations from the queues
         if self.input_queue is not None and self.cancel_queue is not None:
@@ -265,17 +308,19 @@ class ContinuousBatchProcessor:
         # And the size of the payload is infered (always 0 for non-TP drivers)
         payload_size = len(payload[0]) + len(payload[1])
         # Then ALL members of the TP check if their stop event has been set
-        stop_signal = 1 if self.stop_event.is_set() else 0
+        local_stop_status = self.background_thread_status.stop_status
         # The two informations are broadcasted to all members of the TP group (cheap 2 ints broadcast)
-        payload_size, stop_signal = self.distributed_helper.tp_broadcast_state(payload_size, stop_signal)
+        payload_size, tp_stop_status = self.distributed_helper.tp_broadcast_state(payload_size, local_stop_status)
+        # Update the local stop status with the new one
+        self.background_thread_status.update_tp_stop_status(tp_stop_status)
 
-        # If the stop signal is >0, it means one of the TP processes is stopping: stop here as well
-        if stop_signal > 0:
-            self.stop_event.set()  # signal the generation loop to stop
+        # Exit early if the TP group is hard-stopping
+        if self.background_thread_status.is_hard_stopping:
             return True
-        # Otherwise, TP group is still running. If there is no payload, early return, otherwise we broadcast and process it
+        # Same if there is no payload
         if payload_size == 0:
             return False
+        # Otherwise, distribute the payload of TP rank 0 to all other TP ranks
         new_states, cancellations = self.distributed_helper.tp_broadcast_object_from_rank_0(payload)
 
         # All ranks apply the same updates in the same order.
@@ -308,8 +353,8 @@ class ContinuousBatchProcessor:
         False otherwise."""
 
         # Communicate with the TP driver to retrieve new requests, cancellations and an eventual stop signal
-        self.stop_signal_received = self._update_tp_group_state()
-        if self.stop_signal_received:
+        hard_stopping = self._update_tp_group_state()
+        if hard_stopping:
             return False
 
         cancelled_states = self.scheduler.clear_cancelled_requests()
@@ -501,10 +546,9 @@ class ContinuousBatchingManager:
         self._request_counter = 0
         self._request_lock = threading.Lock()
         self._has_new_requests = threading.Event()
-        self.flushing_and_stopping = False
 
         # Processor-related attributes
-        self.stop_generation_event = threading.Event()
+        self.background_thread_status = BackgroundThreadStatus()
         self.output_router = OutputRouter()
         self.batch_processor: ContinuousBatchProcessor | None = None
         self._generation_thread = None
@@ -572,29 +616,22 @@ class ContinuousBatchingManager:
         if self.is_running:
             logger.warning("Manager thread is already running.")
             return None
-        self.stop_generation_event.clear()
+        self.background_thread_status.clear()
         self.fatal_error = None
-        self.flushing_and_stopping = False
         self._generation_thread = threading.Thread(target=self._run_generation_loop)
         self._generation_thread.start()
 
-    def flush_and_stop(
-        self, block: bool = True, timeout: float | None = None, keep_for_next_session: bool = False
+    def stop(
+        self,
+        block: bool = True,
+        timeout: float | None = None,
+        keep_for_next_session: bool = False,
+        hard_stop: bool = False,
     ) -> None:
-        """Waits until all requests are processed and then stops the background generation thread using the `stop`
-        method."""
-        # Go to `stop` method directly if there is nothing to flush
-        if self.batch_processor is None or self._generation_thread is None:
-            return self.stop(block=block, timeout=timeout, keep_for_next_session=keep_for_next_session)
-        # Signal the manager that it is flushing and stopping
-        self.flushing_and_stopping = True
-        # Stop the background generation thread
-        return self.stop(block=block, timeout=timeout, keep_for_next_session=keep_for_next_session)
-
-    def stop(self, block: bool = True, timeout: float | None = None, keep_for_next_session: bool = False) -> None:
         """Stop the background generation thread. If the `block` flag is set to to True, then this method waits for the
         thread to stop for a maximum time of `timeout` seconds (None means no timeout). If the `keep_for_next_session`
-        flag is set to True, then the manager is cached on the model for future use."""
+        flag is set to True, then the manager is cached on the model for future use. If the `hard_stop` flag is set,
+        the background generation thread will be stopped immediately and pending requests will be failed."""
 
         # We expect the batch processor to be initialized at this point. Warn otherwise.
         if self.batch_processor is None:
@@ -610,9 +647,10 @@ class ContinuousBatchingManager:
 
         # Signal the background thread to stop
         stop_trigger_time = perf_counter()
-        if not self.stop_generation_event.is_set():
-            self.stop_generation_event.set()
-            logger.info("Stopping background generation thread...")
+        stop_status = BackgroundThreadStatus.HARD_STOP if hard_stop else BackgroundThreadStatus.FLUSH_AND_STOP
+        if not self.background_thread_status < stop_status:
+            self.background_thread_status.request_stop(stop_status)
+            logger.info(f"Stopping background generation thread with status {stop_status}...")
         # And maybe wait for that to happen
         if block:
             self.join(stop_trigger_time, timeout)
@@ -686,8 +724,8 @@ class ContinuousBatchingManager:
                 self._request_counter += 1
 
         # If the manager is not accepting new requests, throw a warning and return None
-        if self.flushing_and_stopping:
-            logger.warning(f"Manager is flushing and stopping. Request {request_id} will be dropped.")
+        if self.background_thread_status.stop_requested:
+            logger.warning(f"Background thread is stopping. Request {request_id} will be dropped.")
             return None
 
         max_new_tokens = self.generation_config.max_new_tokens if max_new_tokens is None else max_new_tokens
@@ -830,14 +868,15 @@ class ContinuousBatchingManager:
                 self._generation_step()
                 self.current_batch += 1
 
-            # The loop continues until a stop signal has been received from the TP driver
-            while not batch_processor.stop_signal_received or self.flushing_and_stopping:
-                requests_available = batch_processor.prepare_next_batch()  # this is where the TP group communicates.
+            # The loop continues until a stop signal has been broadcasted in the TP group
+            while True:
+                requests_available = batch_processor.prepare_next_batch()  # this is where the TP group communicates
+                # This only happen if the TP group is not stoppig (any kin d of stop) so we can check the status after
                 if requests_available:
                     self._generation_step()
                     batch_processor.update_batch()
                     self.current_batch += 1
-                elif self.flushing_and_stopping:
+                elif self.background_thread_status.is_stopping:
                     break
                 else:
                     self._has_new_requests.wait(timeout=0.1)  # wait for new requests instead of busy-spinning.
@@ -901,7 +940,7 @@ class ContinuousBatchingManager:
             input_queue=self.input_queue if self.is_tp_driver else None,
             cancel_queue=self.cancel_queue if self.is_tp_driver else None,
             output_router=self.output_router,
-            stop_event=self.stop_generation_event,
+            background_thread_status=self.background_thread_status,
             model_device=self.model.device,
             model_dtype=self.model.dtype,
             scheduler=scheduler(paged_attention_cache),
@@ -913,10 +952,10 @@ class ContinuousBatchingManager:
         """Handle critical errors that terminate the generation loop."""
         # Record the error so callers (e.g. the serving layer) can fail fast on subsequent requests
         self.fatal_error = error
-        # Signal stop
-        self.stop_generation_event.set()
+        # Request a hard stop
+        self.background_thread_status.request_stop(BackgroundThreadStatus.HARD_STOP)
         # Communicate to other process in the TP group that the TP driver is stopping
-        self.distributed_helper.tp_broadcast_state(0, 1)
+        self.distributed_helper.tp_broadcast_state(0, BackgroundThreadStatus.HARD_STOP)
         # Fail pending requests in input queue
         try:
             while True:
