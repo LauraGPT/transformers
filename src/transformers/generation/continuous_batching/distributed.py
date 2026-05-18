@@ -60,7 +60,7 @@ class DistributedHelper:
         self.dp_size = self.world_size // self.tp_size
 
         # Accumulator to CPU integer comm
-        self._cpu_int_acc = torch.tensor([0], dtype=torch.int64, device="cpu")
+        self._cpu_int_acc = torch.tensor([0, 0], dtype=torch.int64, device="cpu")
 
     def infer_if_tp_driver(self) -> bool:
         return self.tp_local_rank == 0
@@ -77,13 +77,15 @@ class DistributedHelper:
             dist.broadcast(value, src=self.tp_root_global_rank, async_op=False, group=self.tp_group)
         return value
 
-    def tp_broadcast_int(self, value: int) -> int:
-        """Inside each TP group, broadcasts an integer from rank 0 over the gloo CPU comm group."""
+    def tp_broadcast_state(self, payload_size: int, stop_signal: int) -> tuple[int, int]:
+        """Inside each TP group, all-reduces the payload size and stop signal over the gloo CPU comm group."""
         if self.tp_size > 1:
-            self._cpu_int_acc[0] = value
-            dist.broadcast(self._cpu_int_acc, src=self.tp_root_global_rank, async_op=False, group=self.cpu_comm_group)
-            value = self._cpu_int_acc[0].item()
-        return value
+            self._cpu_int_acc[0] = payload_size
+            self._cpu_int_acc[1] = stop_signal
+            dist.all_reduce(self._cpu_int_acc, op=dist.ReduceOp.SUM, async_op=False, group=self.cpu_comm_group)
+            payload_size = self._cpu_int_acc[0].item()
+            stop_signal = self._cpu_int_acc[1].item()
+        return payload_size, stop_signal
 
     def tp_all_reduce_min(self, value: torch.Tensor) -> torch.Tensor:
         """Inside each TP group, all-reduces a tensor with the MIN op. No-op when TP is off."""
@@ -91,7 +93,7 @@ class DistributedHelper:
             dist.all_reduce(value, op=dist.ReduceOp.MIN, group=self.tp_group)
         return value
 
-    def tp_broadcast_object(self, obj: T) -> T:
+    def tp_broadcast_object_from_rank_0(self, obj: T) -> T:
         """Inside each TP group, broadcasts an arbitrary picklable Python object from TP-rank 0 to all other ranks.
         Used to keep request ingress and cancellations consistent across TP workers without requiring all ranks to
         receive the same external request stream. Uses a dedicated CPU (gloo) `cpu_comm_group` for broadcast."""

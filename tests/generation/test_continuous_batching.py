@@ -511,7 +511,7 @@ class ContinuousBatchingNoAcceleratorTest(unittest.TestCase):
         tensor = torch.tensor([1.0, 2.0])
         self.assertTrue(torch.equal(helper.tp_broadcast_from_rank_0(tensor), tensor))
         obj = {"some_request": "payload"}
-        self.assertIs(helper.tp_broadcast_object(obj), obj)
+        self.assertIs(helper.tp_broadcast_object_from_rank_0(obj), obj)
 
         # All-reduce-min should be a no-op without a TP group
         reduce_tensor = torch.tensor([7, 3], dtype=torch.int64)
@@ -1092,7 +1092,7 @@ class ContinuousBatchingWithAcceleratorTest(unittest.TestCase):
                     results.append(result)
                     requests_left -= 1
                 else:
-                    if not manager.is_running():
+                    if not manager.is_running:
                         break
 
         self.assertEqual(len(results), 2, f"Expected 2 results, but got {len(results) = }")
@@ -1236,7 +1236,7 @@ class ContinuousBatchingWithAcceleratorTest(unittest.TestCase):
                 result = manager.get_result(timeout=1)
                 if result is not None and result.is_finished():
                     results[result.request_id] = result
-                elif not manager.is_running():
+                elif not manager.is_running:
                     break
         finally:
             manager.stop(block=True)
@@ -1474,7 +1474,7 @@ def _tp_continuous_batching_worker(
     # Direct broadcast tests: only rank 0's value should propagate to every TP rank
     helper = DistributedHelper(device_mesh=model._device_mesh)
 
-    received_obj = helper.tp_broadcast_object({"src_rank": rank})
+    received_obj = helper.tp_broadcast_object_from_rank_0({"src_rank": rank})
     assert received_obj == {"src_rank": 0}, f"tp_broadcast_object: rank {rank} got {received_obj}"
 
     sent_tensor = torch.tensor([float(rank)], device=model.device)
