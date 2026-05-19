@@ -77,14 +77,12 @@ class DistributedHelper:
             dist.broadcast(value, src=self.tp_root_global_rank, async_op=False, group=self.tp_group)
         return value
 
-    def tp_broadcast_state(self, payload_size: int, stop_signal: int) -> tuple[int, int]:
+    def tp_all_reduce_state(self, payload_size: int, stop_signal: int) -> tuple[int, int]:
         """Inside each TP group, all-reduces the payload size and stop signal over the gloo CPU comm group."""
         if self.tp_size > 1:
-            self._cpu_int_acc[0] = payload_size
-            self._cpu_int_acc[1] = stop_signal
-            dist.all_reduce(self._cpu_int_acc, op=dist.ReduceOp.SUM, async_op=False, group=self.cpu_comm_group)
-            payload_size = self._cpu_int_acc[0].item()
-            stop_signal = self._cpu_int_acc[1].item()
+            self._cpu_int_acc[:] = [payload_size, stop_signal]
+            dist.all_reduce(self._cpu_int_acc, op=dist.ReduceOp.MAX, async_op=False, group=self.cpu_comm_group)
+            payload_size, stop_signal = self._cpu_int_acc.tolist()
         return payload_size, stop_signal
 
     def tp_all_reduce_min(self, value: torch.Tensor) -> torch.Tensor:
