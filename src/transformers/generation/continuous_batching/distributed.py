@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from datetime import timedelta
 from typing import TypeVar
 
 import torch
@@ -27,7 +28,7 @@ T = TypeVar("T")
 class DistributedHelper:
     """A helper class to handle distributed-related operations. Notably, it does not crash when distributed is off."""
 
-    def __init__(self, device_mesh: DeviceMesh | None) -> None:
+    def __init__(self, device_mesh: DeviceMesh | None, cpu_group_timeout: float | None) -> None:
         self.device_mesh = device_mesh
         self.dist_on = dist.is_available() and dist.is_initialized()
 
@@ -41,9 +42,10 @@ class DistributedHelper:
             self.tp_group = self.device_mesh.get_group()
             self.tp_root_global_rank = dist.get_global_rank(self.tp_group, 0)
             self.tp_local_rank = self.device_mesh.get_local_rank()
-            # If TP is on, we create a dedicate CPU group
+            # If TP is on, we create a dedicated CPU group, with an eventual timeout
             tp_ranks = dist.get_process_group_ranks(self.tp_group)
-            self.cpu_comm_group = dist.new_group(ranks=tp_ranks, backend="gloo")
+            timeout = None if cpu_group_timeout is None else timedelta(seconds=cpu_group_timeout)
+            self.cpu_comm_group = dist.new_group(ranks=tp_ranks, backend="gloo", timeout=timeout)
         else:
             self.tp_size = 1
             self.tp_group = None
@@ -77,13 +79,14 @@ class DistributedHelper:
             dist.broadcast(value, src=self.tp_root_global_rank, async_op=False, group=self.tp_group)
         return value
 
-    def tp_all_reduce_state(self, payload_size: int, stop_signal: int) -> tuple[int, int]:
-        """Inside each TP group, all-reduces the payload size and stop signal over the gloo CPU comm group."""
+    def tp_all_reduce_state(self, payload_size: int, stop_status: int) -> tuple[int, int]:
+        """Broadcasts two information: 1. the size of the payload held by the TP driver (all other rank broadcast 0) and
+        2. the requested stop status (all to all). These information are broadcasted through a MAX-reduce operation."""
         if self.tp_size > 1:
-            self._cpu_int_acc[:] = [payload_size, stop_signal]
+            self._cpu_int_acc[:] = [payload_size, stop_status]
             dist.all_reduce(self._cpu_int_acc, op=dist.ReduceOp.MAX, async_op=False, group=self.cpu_comm_group)
-            payload_size, stop_signal = self._cpu_int_acc.tolist()
-        return payload_size, stop_signal
+            payload_size, stop_status = self._cpu_int_acc.tolist()
+        return payload_size, stop_status
 
     def tp_all_reduce_min(self, value: torch.Tensor) -> torch.Tensor:
         """Inside each TP group, all-reduces a tensor with the MIN op. No-op when TP is off."""

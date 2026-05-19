@@ -368,7 +368,7 @@ class ContinuousBatchingNoAcceleratorTest(unittest.TestCase):
             continuous_batching_config=ContinuousBatchingConfig(block_size=16, num_blocks=8, max_batch_tokens=8),
             device=torch_device,
             tp_plan={},
-            distributed_helper=DistributedHelper(device_mesh=None),
+            distributed_helper=DistributedHelper(device_mesh=None, cpu_group_timeout=60),
         )
 
         # Overload cache parameters to match test scenario
@@ -495,7 +495,7 @@ class ContinuousBatchingNoAcceleratorTest(unittest.TestCase):
 
     def test_distributed_helper_no_dist(self) -> None:
         """Test that DistributedHelper falls back to a single-rank, TP-driver setup when distributed is not on."""
-        helper = DistributedHelper(device_mesh=None)
+        helper = DistributedHelper(device_mesh=None, cpu_group_timeout=60)
         self.assertFalse(helper.dist_on)
         self.assertEqual(helper.global_rank, 0)
         self.assertEqual(helper.world_size, 1)
@@ -520,7 +520,7 @@ class ContinuousBatchingNoAcceleratorTest(unittest.TestCase):
 
     def test_distributed_helper_set_tp_seed_no_dist(self) -> None:
         """Test that set_tp_seed sets a torch seed without distributed initialized, both with and without a user seed."""
-        helper = DistributedHelper(device_mesh=None)
+        helper = DistributedHelper(device_mesh=None, cpu_group_timeout=60)
 
         # Explicit seed: torch RNG state must be reproducible across calls
         helper.set_tp_seed(seed=42, model_device=torch.device("cpu"))
@@ -1472,7 +1472,7 @@ def _tp_continuous_batching_worker(
     ).eval()
 
     # Direct broadcast tests: only rank 0's value should propagate to every TP rank
-    helper = DistributedHelper(device_mesh=model._device_mesh)
+    helper = DistributedHelper(device_mesh=model._device_mesh, cpu_group_timeout=60)
 
     received_obj = helper.tp_broadcast_object_from_rank_0({"src_rank": rank})
     assert received_obj == {"src_rank": 0}, f"tp_broadcast_object: rank {rank} got {received_obj}"

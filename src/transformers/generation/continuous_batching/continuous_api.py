@@ -129,6 +129,8 @@ class OutputRouter:
 
 
 class BackgroundThreadStatus:
+    """Tracks the status of the background thread locally and in its TP group. The status is an int that can only
+    increase, representing how soon the thread should stop."""
 
     DONT_STOP = 0
     FLUSH_AND_STOP = 1
@@ -175,10 +177,12 @@ class BackgroundThreadStatus:
 
     @property
     def local(self) -> int:
+        """The locally requested status, possibly ahead of the value agreed upon by the TP group."""
         return self._local_status
 
     @property
     def tp(self) -> int:
+        """The status last agreed upon by the TP group through a MAX-reduce operation."""
         return self._tp_status
 
 
@@ -214,7 +218,7 @@ class ContinuousBatchProcessor:
             input_queue: Queue for incoming requests. Is None if this process is not a TP driver.
             cancel_queue: Queue for cancellation request_ids. Is None if this process is not a TP driver.
             output_router: An [`OutputRouter`] object that routes outputs to handlers or the output queue.
-            background_thread_status: An [`BackgroundThreadStatus`] object to track the background thread status.
+            background_thread_status: A [`BackgroundThreadStatus`] object to track the background thread status.
             model_device: Device for model inputs/outputs
             model_dtype: Data type for model inputs/outputs
             scheduler: The [`Scheduler`] to use
@@ -577,7 +581,10 @@ class ContinuousBatchingManager:
         self.num_return_sequences = num_return_sequences if num_return_sequences is not None else 1
 
         # Initialize TP-related attributes
-        self.distributed_helper = DistributedHelper(device_mesh=getattr(self.model, "_device_mesh", None))
+        self.distributed_helper = DistributedHelper(
+            device_mesh=getattr(self.model, "_device_mesh", None),
+            cpu_group_timeout=continuous_batching_config.cpu_group_timeout,
+        )
         self.is_tp_driver = self.distributed_helper.is_tp_driver
         # If TP is on, check if NCCL graph mixing is disabled (helps with performance)
         if continuous_batching_config.disable_nccl_graph_mixing:
@@ -617,7 +624,7 @@ class ContinuousBatchingManager:
     # --------------------------------------------- CONTROL FLOW METHODS --------------------------------------------- #
 
     def is_running(self) -> bool:
-        """A boolean property indicating if the background generation thread is running."""
+        """Returns True if the background generation thread has been started and is still alive."""
         return self._generation_thread is not None and self._generation_thread.is_alive()
 
     def start(self) -> None:
@@ -637,7 +644,7 @@ class ContinuousBatchingManager:
         keep_for_next_session: bool = False,
         hard_stop: bool = False,
     ) -> None:
-        """Stop the background generation thread. If the `block` flag is set to to True, then this method waits for the
+        """Stop the background generation thread. If the `block` flag is set to True, then this method waits for the
         thread to stop for a maximum time of `timeout` seconds (None means no timeout). If the `keep_for_next_session`
         flag is set to True, then the manager is cached on the model for future use. If the `hard_stop` flag is set,
         the background generation thread will be stopped immediately and pending requests will be failed."""
@@ -768,7 +775,7 @@ class ContinuousBatchingManager:
         record_timestamps: bool = False,
         **logit_processor_kwargs: Any,
     ) -> list[str]:
-        """Utility function to batch `add_request and return their IDs. Check its documentation for more details."""
+        """Utility function to batch `add_request` and return their IDs. Check its documentation for more details."""
         # Infer the request ids of all incoming requests
         num_requests = len(inputs)
         with self._request_lock:
