@@ -695,6 +695,13 @@ class ContinuousBatchingManager:
             logger.info(f"Background generation thread stopped after {end - stop_trigger_time:.2f}s.")
             self._generation_thread = None
 
+    def destroy(self) -> None:
+        """Terminate the manager and release distributed resources. Safe to call multiple times. After calling this,
+        the manager cannot be restarted."""
+        if self.is_running:
+            self.stop(block=True, keep_for_next_session=False)
+        self.distributed_helper.destroy_cpu_comm_group()
+
     # ---------------------------- REQUEST SUBMISSION, CANCELLATION AND RETRIEVAL METHODS ---------------------------- #
 
     def add_request(
@@ -1064,7 +1071,7 @@ class ContinuousMixin:
         """Destroy the cached continuous batching manager and free GPU resources."""
         cached_manager = getattr(self, "_cached_continuous_batching_manager", None)
         if isinstance(cached_manager, ContinuousBatchingManager):
-            cached_manager.stop(block=True, timeout=None, keep_for_next_session=False)
+            cached_manager.destroy()
             delattr(self, "_cached_continuous_batching_manager")
 
     @contextmanager
@@ -1103,6 +1110,8 @@ class ContinuousMixin:
             # This is a dummy log needed for the logs of stop to show. It won't show.
             logger.debug("Continuous batching loop finished")
             manager.stop(block=block, timeout=timeout, keep_for_next_session=persistent_manager)
+            if not persistent_manager:
+                manager.destroy()
 
     # TODO: support streaming
     @torch.no_grad()
