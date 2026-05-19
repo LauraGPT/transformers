@@ -1092,7 +1092,7 @@ class ContinuousBatchingWithAcceleratorTest(unittest.TestCase):
                     results.append(result)
                     requests_left -= 1
                 else:
-                    if not manager.is_running:
+                    if not manager.is_running():
                         break
 
         self.assertEqual(len(results), 2, f"Expected 2 results, but got {len(results) = }")
@@ -1236,7 +1236,7 @@ class ContinuousBatchingWithAcceleratorTest(unittest.TestCase):
                 result = manager.get_result(timeout=1)
                 if result is not None and result.is_finished():
                     results[result.request_id] = result
-                elif not manager.is_running:
+                elif not manager.is_running():
                     break
         finally:
             manager.stop(block=True)

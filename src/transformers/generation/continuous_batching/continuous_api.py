@@ -616,14 +616,13 @@ class ContinuousBatchingManager:
 
     # --------------------------------------------- CONTROL FLOW METHODS --------------------------------------------- #
 
-    @property
     def is_running(self) -> bool:
         """A boolean property indicating if the background generation thread is running."""
         return self._generation_thread is not None and self._generation_thread.is_alive()
 
     def start(self) -> None:
         """Start the background generation thread."""
-        if self.is_running:
+        if self.is_running():
             logger.warning("Manager thread is already running.")
             return None
         self.background_thread_status.clear()
@@ -698,7 +697,7 @@ class ContinuousBatchingManager:
     def destroy(self) -> None:
         """Terminate the manager and release distributed resources. Safe to call multiple times. After calling this,
         the manager cannot be restarted."""
-        if self.is_running:
+        if self.is_running():
             self.stop(block=True, keep_for_next_session=False)
         self.distributed_helper.destroy_cpu_comm_group()
 
@@ -733,7 +732,8 @@ class ContinuousBatchingManager:
             return None
         # If the manager is not accepting new requests, throw a warning and return None
         if self.background_thread_status.local >= BackgroundThreadStatus.FLUSH_AND_STOP:
-            logger.warning(f"Background thread is stopping. Request {request_id} will be dropped.")
+            preview = f"{input_ids[:3]}"[:-1] + ", ..., " + f"{input_ids[-3:]}"[1:]
+            logger.warning(f"Background thread is stopping. Request with ids {preview} will be dropped.")
             return None
 
         if request_id is None:
@@ -884,14 +884,23 @@ class ContinuousBatchingManager:
             # The loop continues until a stop signal has been broadcasted in the TP group
             while True:
                 requests_available = batch_processor.prepare_next_batch()  # this is where the TP group communicates
+
                 # This only happens if the TP group is not stopping (any kind of stop) so we can check the status after
                 if requests_available:
                     self._generation_step()
                     batch_processor.update_batch()
                     self.current_batch += 1
-                # Here, we give the opportunity for the loop to exit if the TP group is stopping
-                elif self.background_thread_status.tp > BackgroundThreadStatus.DONT_STOP:
+
+                # Stop the loop if the TP group is hard-stopping
+                elif self.background_thread_status.tp == BackgroundThreadStatus.HARD_STOP:
                     break
+                # Stop the loop if the TP group is flushing and there are no pending requests
+                elif (
+                    self.background_thread_status.tp == BackgroundThreadStatus.FLUSH_AND_STOP
+                    and not batch_processor.has_pending_requests()
+                ):
+                    break
+
                 # Otherwise, we wait for new requests and re-enter the loop
                 else:
                     self._has_new_requests.wait(timeout=0.1)  # wait for new requests instead of busy-spinning.
@@ -1197,7 +1206,7 @@ class ContinuousMixin:
                             results[req_id] = result
                             finished_count += 1
                             pbar.update(1)
-                    elif not manager.is_running:
+                    elif not manager.is_running():
                         logger.error("Generation thread terminated unexpectedly.")
                         # This helps get some information in stdout
                         print("Returning results of generate_batch despite unexpected termination.")
