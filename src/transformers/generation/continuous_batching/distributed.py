@@ -36,6 +36,8 @@ class DistributedHelper:
         self.check_device_mesh_for_cb(self.device_mesh)
         # Extract a non-trivial TP mesh if it exists
         tp_mesh = self.extract_tp_mesh(self.device_mesh)
+        if tp_mesh is not None and not self.dist_on:
+            raise ValueError(f"Distributed is off but received {device_mesh = }.")
 
         # These attributes depend on the global dist state
         self.global_rank = dist.get_rank() if self.dist_on else 0
