@@ -83,7 +83,8 @@ class DistributedHelper:
         """Broadcasts two information: 1. the size of the payload held by the TP driver (all other rank broadcast 0) and
         2. the requested stop status (all to all). These information are broadcasted through a MAX-reduce operation."""
         if self.tp_size > 1:
-            self._cpu_int_acc[:] = [payload_size, stop_status]
+            self._cpu_int_acc[0] = payload_size
+            self._cpu_int_acc[1] = stop_status
             dist.all_reduce(self._cpu_int_acc, op=dist.ReduceOp.MAX, async_op=False, group=self.cpu_comm_group)
             payload_size, stop_status = self._cpu_int_acc.tolist()
         return payload_size, stop_status
