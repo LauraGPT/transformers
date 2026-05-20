@@ -335,12 +335,20 @@ class ColwiseParallel(TensorParallelStyle):
 
     def transform_inputs_pre_forward(self, module, args, kwargs, mesh):
         x = args[0]
-        if not isinstance(x, DTensor):
+        # In a training context, inputs are wrapped in a DTensor
+        if module.training and not isinstance(x, DTensor):
             x = DTensor.from_local(x, mesh, [self.input_layouts], run_check=False)
+        # In an inference context, inputs are kept as plain tensors so the matmul does not use DTensor's dispatcher
+        elif not module.training and isinstance(x, DTensor):
+            x = x.to_local()
         return (x,) + args[1:], kwargs
 
+    def context_around_forward(self, module):
+        """In inference, swaps DTensor params to plain local Parameters so nn.Linear runs as a plain matmul"""
+        return contextlib.nullcontext() if module.training else _swap_dtensor_params_for_local(module)
+
     def transform_output_post_forward(self, module, output, mesh):
-        # Inference path
+        # Inference path: forward ran on local tensors; output is already local for Shard(-1).
         if not module.training and self.output_layouts == Shard(-1):
             return output.to_local() if isinstance(output, DTensor) else output
         # Training path
@@ -382,12 +390,20 @@ class RowwiseParallel(TensorParallelStyle):
 
     def transform_inputs_pre_forward(self, module, args, kwargs, mesh):
         x = args[0]
-        if not isinstance(x, DTensor):
+        # In a training context, inputs are wrapped in a DTensor
+        if module.training and not isinstance(x, DTensor):
             x = DTensor.from_local(x, mesh, [self.input_layouts], run_check=False)
+        # In an inference context, inputs are kept as plain tensors so the matmul does not use DTensor's dispatcher
+        elif not module.training and isinstance(x, DTensor):
+            x = x.to_local()
         return (x,) + args[1:], kwargs
 
+    def context_around_forward(self, module):
+        """In inference, swaps DTensor params to plain local Parameters so nn.Linear runs as a plain matmul"""
+        return contextlib.nullcontext() if module.training else _swap_dtensor_params_for_local(module)
+
     def transform_output_post_forward(self, module, output, mesh):
-        # Inference path
+        # Inference path: output is local (Partial sum), do plain in-place all-reduce.
         if not module.training and self.output_layouts == Replicate():
             local = output.to_local() if isinstance(output, DTensor) else output
             dist.all_reduce(local, op=dist.ReduceOp.SUM, group=module._tp_group)
