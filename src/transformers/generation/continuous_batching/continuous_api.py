@@ -582,7 +582,7 @@ class ContinuousBatchingManager:
 
         # Initialize TP-related attributes
         self.distributed_helper = DistributedHelper(
-            device_mesh=getattr(self.model, "_device_mesh", None),
+            device_mesh=getattr(self.model, "device_mesh", None),
             cpu_group_timeout=continuous_batching_config.cpu_group_timeout,
         )
         self.is_tp_driver = self.distributed_helper.is_tp_driver

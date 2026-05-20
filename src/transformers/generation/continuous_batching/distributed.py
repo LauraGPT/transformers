@@ -29,19 +29,31 @@ class DistributedHelper:
     """A helper class to handle distributed-related operations. Notably, it does not crash when distributed is off."""
 
     def __init__(self, device_mesh: DeviceMesh | None, cpu_group_timeout: float | None) -> None:
-        self.device_mesh = device_mesh
         self.dist_on = dist.is_available() and dist.is_initialized()
+        self.device_mesh = device_mesh
+
+        # Check validity of the device mesh
+        self.check_device_mesh_for_cb(self.device_mesh)
+
+        # Extract a non-trivial TP mesh if it exists
+        if device_mesh is not None and "tp" in device_mesh.mesh_dim_names and device_mesh["tp"].size() > 1:
+            tp_mesh = device_mesh["tp"]
+        else:
+            tp_mesh = None
+        # Raise an error if distributed is off and a non-trivial TP mesh is found
+        if tp_mesh is not None and not self.dist_on:
+            raise ValueError(f"Distributed is off but received {device_mesh = }.")
 
         # These attributes depend on the global dist state
         self.global_rank = dist.get_rank() if self.dist_on else 0
         self.world_size = dist.get_world_size() if self.dist_on else 1
 
         # These attributes depend on the TP state
-        if self.dist_on and self.device_mesh is not None:
-            self.tp_size = self.device_mesh.size()
-            self.tp_group = self.device_mesh.get_group()
+        if tp_mesh is not None:
+            self.tp_size = tp_mesh.size()
+            self.tp_group = tp_mesh.get_group()
             self.tp_root_global_rank = dist.get_global_rank(self.tp_group, 0)
-            self.tp_local_rank = self.device_mesh.get_local_rank()
+            self.tp_local_rank = tp_mesh.get_local_rank()
             # If TP is on, we create a dedicated CPU group, with an eventual timeout
             tp_ranks = dist.get_process_group_ranks(self.tp_group)
             timeout = None if cpu_group_timeout is None else timedelta(seconds=cpu_group_timeout)
@@ -63,6 +75,16 @@ class DistributedHelper:
 
         # Accumulator to CPU integer comm
         self._cpu_int_acc = torch.tensor([0, 0], dtype=torch.int64, device="cpu")
+
+    @staticmethod
+    def check_device_mesh_for_cb(device_mesh: DeviceMesh | None) -> None:
+        """Checks the validity of the device mesh for continuous batching."""
+        # No device mesh = no distributed = life is good
+        if device_mesh is None:
+            return None
+        # FSDP is not compatible with continuous batching, so we raise an error if it is used
+        if "fsdp" in device_mesh.mesh_dim_names and device_mesh["fsdp"].size() > 1:
+            raise ValueError(f"FSDP is not compatible with continuous batching but got {device_mesh = }.")
 
     def infer_if_tp_driver(self) -> bool:
         return self.tp_local_rank == 0
