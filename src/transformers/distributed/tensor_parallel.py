@@ -301,19 +301,11 @@ class PackedColwiseParallel(TensorParallelStyle):
 
 
 class ColwiseParallel(TensorParallelStyle):
-    """Column-wise sharded linear, mode-aware forward.
-
-    Load-time: weight is a DTensor with Shard(-2); bias (if present) is Shard(-1).
-    `DtensorShardOperation` uses these placements to slice the checkpoint.
-
-    Forward path depends on `module.training` (toggled by `model.eval()` / `model.train()`):
-    - **training**: input wrapped as Replicate DTensor, matmul produces Shard(-1)
-      DTensor, output redistributed via DTensor's autograd-aware path.
-    - **inference (eval)**: input wrapped, matmul still goes through DTensor,
-      but the output is unwrapped via `.to_local()` — no `redistribute()` call.
-
-    `colwise` plan entries produce Shard(-1) output that feeds straight into the
-    matching `rowwise_allreduce` without any inter-layer collective."""
+    """Column-wise sharded linear with a mode-aware forward: at load time the weight is sharded on dim -2 and the bias
+    on dim -1, and at runtime the path depends on `module.training`. In training, inputs are wrapped as a Replicate
+    DTensor and the matmul flows through DTensor's autograd path. In inference, params are swapped to plain local
+    Parameters via `context_around_forward` and the matmul runs as a plain nn.Linear on local shards, producing a
+    Shard(-1) output that feeds directly into the matching `rowwise_allreduce`."""
 
     def __init__(self, *, input_layouts=None, output_layouts=None, use_local_output=True):
         super().__init__()
@@ -360,17 +352,11 @@ class ColwiseParallel(TensorParallelStyle):
 
 
 class RowwiseParallel(TensorParallelStyle):
-    """Row-wise sharded linear with all-reduce on output, mode-aware forward.
-
-    Load-time: weight is a DTensor with Shard(-1); bias stays replicated.
-
-    Forward path depends on `module.training`:
-    - **training**: output is a Partial DTensor; redistribute to Replicate
-      runs the autograd-aware all-reduce (forward sums partials, backward is
-      identity).
-    - **inference (eval)**: output is unwrapped via `.to_local()` and a raw
-      `dist.all_reduce` runs in place. Skips DTensor's `redistribute()` Python
-      machinery for inference speed."""
+    """Row-wise sharded linear with a mode-aware forward: the weight is sharded on dim -1, the bias stays replicated,
+    and the all-reduce on output is selected by `module.training`. In training, the Partial DTensor output is
+    redistributed to Replicate through DTensor's autograd-aware path. In inference, params are swapped to plain local
+    Parameters via `context_around_forward` and the local Partial sum is reduced with a raw in-place `dist.all_reduce`,
+    skipping DTensor's Python machinery."""
 
     def __init__(self, *, input_layouts=None, output_layouts=None):
         super().__init__()
