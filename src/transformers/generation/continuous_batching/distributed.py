@@ -34,15 +34,8 @@ class DistributedHelper:
 
         # Check validity of the device mesh
         self.check_device_mesh_for_cb(self.device_mesh)
-
         # Extract a non-trivial TP mesh if it exists
-        if device_mesh is not None and "tp" in device_mesh.mesh_dim_names and device_mesh["tp"].size() > 1:
-            tp_mesh = device_mesh["tp"]
-        else:
-            tp_mesh = None
-        # Raise an error if distributed is off and a non-trivial TP mesh is found
-        if tp_mesh is not None and not self.dist_on:
-            raise ValueError(f"Distributed is off but received {device_mesh = }.")
+        tp_mesh = self.extract_tp_mesh(self.device_mesh)
 
         # These attributes depend on the global dist state
         self.global_rank = dist.get_rank() if self.dist_on else 0
@@ -82,9 +75,21 @@ class DistributedHelper:
         # No device mesh = no distributed = life is good
         if device_mesh is None:
             return None
+        # If there are no named dims, we don't support it
+        if device_mesh.mesh_dim_names is None:
+            raise ValueError(f"Continuous batching does not support unnamed device meshes but got {device_mesh = }.")
         # FSDP is not compatible with continuous batching, so we raise an error if it is used
         if "fsdp" in device_mesh.mesh_dim_names and device_mesh["fsdp"].size() > 1:
             raise ValueError(f"FSDP is not compatible with continuous batching but got {device_mesh = }.")
+
+    @staticmethod
+    def extract_tp_mesh(device_mesh: DeviceMesh | None) -> DeviceMesh | None:
+        """Extracts the TP mesh from the device mesh if it exists and is non-trivial."""
+        if device_mesh is None or device_mesh.mesh_dim_names is None:
+            return None
+        if "tp" in device_mesh.mesh_dim_names and device_mesh["tp"].size() > 1:
+            return device_mesh["tp"]
+        return None
 
     def infer_if_tp_driver(self) -> bool:
         return self.tp_local_rank == 0

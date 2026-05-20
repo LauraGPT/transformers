@@ -4808,7 +4808,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
 
         # When loading via distributed_config the device_map is None, so get_device(None, key) always returns "cpu".
         # This means that the missing params and non-persistent buffers (like RoPE's `inv_freq`) are left on CPU.
-        # Then in every forward pass, they are transfered to the device, which is slow and not CUDA graphable.
+        # Then in every forward pass, they are transferred to the device, which is slow and not CUDA graphable.
         # To avoid this, we use the local accelerator as a default device (inferred only once and cached).
         if device_map is None and device_mesh is not None and device_mesh.device_type != "cpu":
             default_device = torch.device(device_mesh.device_type, int(os.environ.get("LOCAL_RANK", 0)))
