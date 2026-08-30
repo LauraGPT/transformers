@@ -236,9 +236,7 @@ class MossTranscribeDiarizeProcessorTest(ProcessorTesterMixin, unittest.TestCase
         processor = self.get_processor()
         batch_size = 2
         audios = self.prepare_audio_inputs(batch_size=batch_size)
-        conversations = [
-            [{"role": "user", "content": [{"type": "audio", "audio": audio}]}] for audio in audios
-        ]
+        conversations = [[{"role": "user", "content": [{"type": "audio", "audio": audio}]}] for audio in audios]
         outputs = processor.apply_chat_template(
             conversations,
             tokenize=True,

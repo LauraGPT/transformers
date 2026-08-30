@@ -14,8 +14,6 @@
 
 import unittest
 
-from parameterized import parameterized
-
 from transformers import (
     AutoProcessor,
     MossTranscribeDiarizeConfig,
@@ -85,13 +83,13 @@ class MossTranscribeDiarizeForConditionalGenerationModelTest(ALMModelTest, unitt
     def _audio_features_get_expected_num_hidden_states(self, model_tester=None):
         return self.model_tester.encoder_layers + 1
 
-    @unittest.skip(
-        reason="MossTranscribeDiarize replaces audio-token embeddings when input_features are provided."
-    )
+    @unittest.skip(reason="MossTranscribeDiarize replaces audio-token embeddings when input_features are provided.")
     def test_inputs_embeds_matches_input_ids(self):
         pass
 
-    @unittest.skip(reason="MossTranscribeDiarize uses audio_feature_lengths/audio_chunk_mapping instead of audio masks.")
+    @unittest.skip(
+        reason="MossTranscribeDiarize uses audio_feature_lengths/audio_chunk_mapping instead of audio masks."
+    )
     def test_mismatching_num_audio_tokens(self):
         pass
 
@@ -151,7 +149,9 @@ class MossTranscribeDiarizeForConditionalGenerationModelTest(ALMModelTest, unitt
         audio_feature_lengths = torch.full((num_chunks,), 2, dtype=torch.long, device=torch_device)
         whisper_features = torch.stack(
             [
-                torch.full((whisper_seq_len, hidden_size), float(chunk_idx + 1), device=torch_device, dtype=model.dtype)
+                torch.full(
+                    (whisper_seq_len, hidden_size), float(chunk_idx + 1), device=torch_device, dtype=model.dtype
+                )
                 for chunk_idx in range(num_chunks)
             ]
         )
@@ -253,9 +253,7 @@ class MossTranscribeDiarizeModelConversionTest(unittest.TestCase):
             model = MossTranscribeDiarizeForConditionalGeneration(MossTranscribeDiarizeConfig())
         meta_state_dict = model.state_dict()
         renamings = [
-            conversion
-            for conversion in get_model_conversion_mapping(model)
-            if isinstance(conversion, WeightRenaming)
+            conversion for conversion in get_model_conversion_mapping(model) if isinstance(conversion, WeightRenaming)
         ]
 
         renamed_key, _ = rename_source_key(
@@ -280,9 +278,7 @@ class MossTranscribeDiarizeModelConversionTest(unittest.TestCase):
 @require_torch
 class MossTranscribeDiarizeForConditionalGenerationIntegrationTest(unittest.TestCase):
     checkpoint_name = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
-    audio_url = (
-        "https://huggingface.co/datasets/bezzam/audio_samples/resolve/main/librispeech_mr_quilter.wav"
-    )
+    audio_url = "https://huggingface.co/datasets/bezzam/audio_samples/resolve/main/librispeech_mr_quilter.wav"
 
     def setUp(self):
         self.processor = AutoProcessor.from_pretrained(self.checkpoint_name)
@@ -303,9 +299,7 @@ class MossTranscribeDiarizeForConditionalGenerationIntegrationTest(unittest.Test
             skip_special_tokens=True,
         )[0]
 
-        EXPECTED_TEXT = (
-            "Mister quilter is apostle of the middle classes, and we are glad to welcome his gospel."
-        )
+        EXPECTED_TEXT = "Mister quilter is apostle of the middle classes, and we are glad to welcome his gospel."
         self.assertIn("[S01]", decoded)
         self.assertIn(EXPECTED_TEXT, decoded)
 

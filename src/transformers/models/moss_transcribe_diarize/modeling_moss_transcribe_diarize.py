@@ -81,6 +81,32 @@ class MossTranscribeDiarizeModelOutputWithPast(BaseModelOutputWithPast):
 
 @auto_docstring(
     custom_intro="""
+    Base class for MossTranscribeDiarize causal language model (or autoregressive) outputs.
+    """
+)
+@dataclass
+class MossTranscribeDiarizeCausalLMOutputWithPast(ModelOutput):
+    r"""
+    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+        Language modeling loss (for next-token prediction).
+    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+        Prediction scores of the language modeling head.
+    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+        It is a [`~cache_utils.Cache`] instance.
+    audio_hidden_states (`torch.FloatTensor`, *optional*):
+        Hidden states of the audio encoder after projection.
+    """
+
+    loss: torch.FloatTensor | None = None
+    logits: torch.FloatTensor | None = None
+    past_key_values: Cache | None = None
+    hidden_states: tuple[torch.FloatTensor] | None = None
+    attentions: tuple[torch.FloatTensor] | None = None
+    audio_hidden_states: torch.FloatTensor | None = None
+
+
+@auto_docstring(
+    custom_intro="""
     The MOSS-Transcribe-Diarize model: Whisper encoder, 4x time merge, multi-modal projector, and Qwen3 language model.
     """
 )
@@ -253,32 +279,6 @@ class MossTranscribeDiarizeModel(MossTranscribeDiarizePreTrainedModel):
 
 @auto_docstring(
     custom_intro="""
-    Base class for MossTranscribeDiarize causal language model (or autoregressive) outputs.
-    """
-)
-@dataclass
-class MossTranscribeDiarizeCausalLMOutputWithPast(ModelOutput):
-    r"""
-    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-        Language modeling loss (for next-token prediction).
-    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-        Prediction scores of the language modeling head.
-    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-        It is a [`~cache_utils.Cache`] instance.
-    audio_hidden_states (`torch.FloatTensor`, *optional*):
-        Hidden states of the audio encoder after projection.
-    """
-
-    loss: torch.FloatTensor | None = None
-    logits: torch.FloatTensor | None = None
-    past_key_values: Cache | None = None
-    hidden_states: tuple[torch.FloatTensor] | None = None
-    attentions: tuple[torch.FloatTensor] | None = None
-    audio_hidden_states: torch.FloatTensor | None = None
-
-
-@auto_docstring(
-    custom_intro="""
     The MOSS-Transcribe-Diarize model for conditional generation with transcription and speaker diarization.
     """
 )
@@ -301,7 +301,6 @@ class MossTranscribeDiarizeForConditionalGeneration(MossTranscribeDiarizePreTrai
         self,
         input_ids: torch.LongTensor | None = None,
         input_features: torch.FloatTensor | None = None,
-        input_features_mask: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
@@ -371,5 +370,4 @@ __all__ = [
     "MossTranscribeDiarizePreTrainedModel",
     "MossTranscribeDiarizeModel",
     "MossTranscribeDiarizeForConditionalGeneration",
-    "MossTranscribeDiarizeMultiModalProjector",
 ]

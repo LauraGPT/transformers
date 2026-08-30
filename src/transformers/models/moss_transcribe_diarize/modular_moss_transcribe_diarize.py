@@ -30,6 +30,7 @@ from ...processing_utils import ProcessorMixin, Unpack, prepare_prompt_input
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.import_utils import requires
 from ..audioflamingo3.modeling_audioflamingo3 import (
+    AudioFlamingo3CausalLMOutputWithPast,
     AudioFlamingo3ForConditionalGeneration,
     AudioFlamingo3MultiModalProjector,
 )
@@ -43,14 +44,12 @@ from ..glmasr.modeling_glmasr import (
 from ..glmasr.processing_glmasr import GlmAsrProcessor, GlmAsrProcessorKwargs
 
 
-@auto_docstring
+@auto_docstring(checkpoint="OpenMOSS-Team/MOSS-Transcribe-Diarize")
 @strict
 class MossTranscribeDiarizeConfig(GlmAsrConfig):
     r"""
     audio_merge_size (`int`, *optional*, defaults to 4):
         Number of consecutive Whisper encoder frames concatenated before the multi-modal projector.
-    audio_encoder_stride (`int`, *optional*, defaults to 2):
-        Temporal downsampling factor from the Whisper encoder convolutions used when counting audio tokens.
     adaptor_input_dim (`int`, *optional*):
         Input dimension of the multi-modal projector. Defaults to `audio_config.d_model * audio_merge_size`.
     projector_bias (`bool`, *optional*, defaults to `True`):
@@ -88,7 +87,6 @@ class MossTranscribeDiarizeConfig(GlmAsrConfig):
 
     audio_token_id: int = 151671
     audio_merge_size: int = 4
-    audio_encoder_stride: int = 2
     adaptor_input_dim: int | None = None
     projector_hidden_act: str = "silu"
     projector_bias: bool = True
@@ -247,7 +245,7 @@ class MossTranscribeDiarizeProcessor(GlmAsrProcessor):
         if self.enable_time_marker and self.time_marker_every_seconds > 0:
             return self._build_time_marker_span(num_tokens)
         return self.audio_token * num_tokens
-        
+
     def _build_time_marker_span(self, num_tokens: int) -> str:
         num_tokens = int(num_tokens)
         if num_tokens <= 0:
@@ -271,8 +269,6 @@ class MossTranscribeDiarizeProcessor(GlmAsrProcessor):
         if remainder > 0:
             parts.append(self.audio_token * remainder)
         return "".join(parts)
-
-
 
     @property
     def model_input_names(self) -> list[str]:
@@ -355,6 +351,10 @@ class MossTranscribeDiarizePreTrainedModel(GlmAsrPreTrainedModel):
 @auto_docstring
 @dataclass
 class MossTranscribeDiarizeModelOutputWithPast(GlmAsrModelOutputWithPast):
+    pass
+
+
+class MossTranscribeDiarizeCausalLMOutputWithPast(AudioFlamingo3CausalLMOutputWithPast):
     pass
 
 
@@ -518,7 +518,6 @@ class MossTranscribeDiarizeForConditionalGeneration(AudioFlamingo3ForConditional
         self,
         input_ids: torch.LongTensor | None = None,
         input_features: torch.FloatTensor | None = None,
-        input_features_mask: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
@@ -587,9 +586,7 @@ class MossTranscribeDiarizeForConditionalGeneration(AudioFlamingo3ForConditional
 __all__ = [
     "MossTranscribeDiarizeConfig",
     "MossTranscribeDiarizeProcessor",
-    "MossTranscribeDiarizeProcessorKwargs",
     "MossTranscribeDiarizePreTrainedModel",
     "MossTranscribeDiarizeModel",
     "MossTranscribeDiarizeForConditionalGeneration",
-    "MossTranscribeDiarizeMultiModalProjector",
 ]

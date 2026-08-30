@@ -310,4 +310,4 @@ class MossTranscribeDiarizeProcessor(ProcessorMixin):
         return "".join(parts)
 
 
-__all__ = ["MossTranscribeDiarizeProcessor", "MossTranscribeDiarizeProcessorKwargs"]
+__all__ = ["MossTranscribeDiarizeProcessor"]

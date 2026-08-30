@@ -25,14 +25,12 @@ from ...utils import auto_docstring
 from ..auto import CONFIG_MAPPING, AutoConfig
 
 
-@auto_docstring
+@auto_docstring(checkpoint="OpenMOSS-Team/MOSS-Transcribe-Diarize")
 @strict
 class MossTranscribeDiarizeConfig(PreTrainedConfig):
     r"""
     audio_merge_size (`int`, *optional*, defaults to 4):
         Number of consecutive Whisper encoder frames concatenated before the multi-modal projector.
-    audio_encoder_stride (`int`, *optional*, defaults to 2):
-        Temporal downsampling factor from the Whisper encoder convolutions used when counting audio tokens.
     adaptor_input_dim (`int`, *optional*):
         Input dimension of the multi-modal projector. Defaults to `audio_config.d_model * audio_merge_size`.
     projector_bias (`bool`, *optional*, defaults to `True`):
@@ -76,7 +74,6 @@ class MossTranscribeDiarizeConfig(PreTrainedConfig):
         "scale_embedding": False,
     }
     audio_merge_size: int = 4
-    audio_encoder_stride: int = 2
     adaptor_input_dim: int | None = None
     projector_bias: bool = True
 
